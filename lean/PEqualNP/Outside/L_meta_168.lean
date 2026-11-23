@@ -5,8 +5,6 @@ namespace PEqualNP.Outside.LMeta168
 
 open PEqualNP.CircuitLowerBounds PEqualNP.MetaComplexity
 
-set_option linter.unusedSimpArgs false
-
 /-- One gate step of the wire evaluation. -/
 def stepB (w : List Bool) (g : Gate) : List Bool :=
   w ++ [g.op.eval (g.inputs.map fun i => w.getD i false)]
@@ -30,9 +28,15 @@ theorem getD_concat {α : Type} (l : List α) (a d : α) (i : ℕ) :
 def Reads (n : ℕ) (g : Gate) : Prop :=
   g.op = GateOp.not ∧ g.inputs.head? = some n ∨ g.op ≠ GateOp.not ∧ n ∈ g.inputs
 
-deriving instance DecidableEq for GateOp
+/-- `Reads` as a Boolean test. -/
+def readsB (n : ℕ) (g : Gate) : Bool :=
+  match g.op with
+  | GateOp.not => g.inputs.head? == some n
+  | _ => g.inputs.contains n
 
-instance (n : ℕ) (g : Gate) : Decidable (Reads n g) := by unfold Reads; infer_instance
+theorem readsB_iff (n : ℕ) (g : Gate) : readsB n g = true ↔ Reads n g := by
+  unfold readsB Reads
+  cases g.op <;> simp
 
 /-- The operations of a fan-in-two circuit. -/
 def OkOp (op : GateOp) : Prop := op = GateOp.and ∨ op = GateOp.or ∨ op = GateOp.not
@@ -51,7 +55,7 @@ def rights : List AV → List ℕ
   | Sum.inr w :: l => w :: rights l
 
 /-- Simplify a gate whose inputs are abstract values. `inl v`: the gate's value is `v` and no
-gate is needed; `inr g`: emit the gate `g`. -/
+  gate is needed; `inr g`: emit the gate `g`. -/
 def simpGate (op : GateOp) (ins : List AV) : AV ⊕ Gate :=
   match op with
   | GateOp.and =>
@@ -120,8 +124,8 @@ theorem simpGate_reads (op : GateOp) (ins : List AV) (hop : OkOp op) (hlen : ins
       simp_all [simpGate, rights]
   · simp at hlen
 
-/-- One step of the partial evaluation: the abstract values of the old wires, and the gates of
-the new circuit on `n` inputs. -/
+/-- One step of the simplified evaluation: the abstract values of the old wires, and the gates of
+  the new circuit on `n` inputs. -/
 def stepS (n : ℕ) (s : List AV × List Gate) (g : Gate) : List AV × List Gate :=
   match simpGate g.op (g.inputs.map fun i => s.1.getD i (Sum.inl false)) with
   | Sum.inl v => (s.1 ++ [v], s.2)
@@ -130,12 +134,12 @@ def stepS (n : ℕ) (s : List AV × List Gate) (g : Gate) : List AV × List Gate
 /-- Gates of a fan-in-two circuit. -/
 def OkGate (g : Gate) : Prop := OkOp g.op ∧ g.inputs.length ≤ 2
 
-/-- The invariant of the partial evaluation, for new inputs `x` (of length `n`) and old wires `W`. -/
-structure Inv (n : ℕ) (x : List Bool) (s : List AV × List Gate) (W : List Bool) : Prop where
-  val : ∀ i, interp (s.2.foldl stepB x) (s.1.getD i (Sum.inl false)) = W.getD i false
-  bound : ∀ i w, s.1.getD i (Sum.inl false) = Sum.inr w → w < n + s.2.length
-  len : s.1.length = W.length
-  fan : ∀ g ∈ s.2, OkGate g
+/-- The invariant of the simplified evaluation, for new inputs `x` (of length `n`) and old wires `W`. -/
+abbrev Inv (n : ℕ) (x : List Bool) (s : List AV × List Gate) (W : List Bool) : Prop :=
+  (∀ i, interp (s.2.foldl stepB x) (s.1.getD i (Sum.inl false)) = W.getD i false) ∧
+  (∀ i w, s.1.getD i (Sum.inl false) = Sum.inr w → w < n + s.2.length) ∧
+  s.1.length = W.length ∧
+  (∀ g ∈ s.2, OkGate g)
 
 theorem interp_mono (W : List Bool) (b : Bool) (v : AV)
     (hv : ∀ w, v = Sum.inr w → w < W.length) : interp (W ++ [b]) v = interp W v := by
@@ -231,12 +235,12 @@ theorem fold_inv (n : ℕ) (x : List Bool) (hx : x.length = n) (gs : List Gate)
     exact ih (fun g' hg' => hgs g' (List.mem_cons_of_mem g hg')) _ _
       (step_inv n x hx s W g (hgs g List.mem_cons_self) hI)
 
-/-- The partial evaluation keeps the entry at `n` and adds at most one new gate per old gate,
-none for a gate reading wire `n`. -/
+/-- The simplified evaluation keeps the entry at `n` and adds at most one new gate per old gate,
+  none for a gate reading wire `n`. -/
 theorem fold_count (n : ℕ) (gs : List Gate) (hgs : ∀ g ∈ gs, OkGate g)
     (s : List AV × List Gate) (hn : n < s.1.length) (hs : s.1.getD n (Sum.inl false) = Sum.inl false) :
     (gs.foldl (stepS n) s).1.getD n (Sum.inl false) = Sum.inl false ∧
-    (gs.foldl (stepS n) s).2.length + gs.countP (fun g => decide (Reads n g)) ≤
+    (gs.foldl (stepS n) s).2.length + gs.countP (fun g => readsB n g) ≤
       s.2.length + gs.length := by
   induction gs generalizing s with
   | nil => exact ⟨hs, by simp⟩
@@ -250,11 +254,13 @@ theorem fold_count (n : ℕ) (gs : List Gate) (hgs : ∀ g ∈ gs, OkGate g)
       unfold stepS; split <;> simp only <;> rw [List.getD_append _ _ _ _ hn, hs]
     obtain ⟨h1, h2⟩ := ih hrest (stepS n s g) hlen' hs'
     refine ⟨h1, ?_⟩
-    have hstep : (stepS n s g).2.length + (if Reads n g then 1 else 0) ≤ s.2.length + 1 := by
+    have hstep : (stepS n s g).2.length + (if readsB n g = true then 1 else 0) ≤
+        s.2.length + 1 := by
       set ins := g.inputs.map fun i => s.1.getD i (Sum.inl false) with hins
       have hinsLen : ins.length ≤ 2 := by rw [hins, List.length_map]; exact hg.2
-      by_cases hr : Reads n g
-      · rw [if_pos hr]
+      by_cases hrb : readsB n g = true
+      · rw [if_pos hrb]
+        have hr := (readsB_iff n g).mp hrb
         have hread : g.op = GateOp.not ∧ ins.head? = some (Sum.inl false) ∨
             g.op ≠ GateOp.not ∧ Sum.inl false ∈ ins := by
           rcases hr with ⟨hop, hh⟩ | ⟨hop, hm⟩
@@ -268,14 +274,10 @@ theorem fold_count (n : ℕ) (gs : List Gate) (hgs : ∀ g ∈ gs, OkGate g)
         obtain ⟨v, hv⟩ := simpGate_reads g.op ins hg.1 hinsLen hread
         unfold stepS
         rw [← hins, hv]
-      · rw [if_neg hr]
+      · rw [if_neg hrb]
         unfold stepS
         split <;> simp
     rw [List.countP_cons]
-    have : (if (decide (Reads n g)) = true then 1 else 0) =
-        (if Reads n g then 1 else 0) := by
-      by_cases hr : Reads n g <;> simp [hr]
-    rw [this]
     simp only [List.length_cons]
     omega
 
@@ -299,7 +301,7 @@ theorem two_le_countP {α : Type} (p : α → Bool) :
       split <;> omega
 
 /-- With no gate reading wire `n`, the wires on two inputs differing only at `n` agree away
-from `n`. -/
+  from `n`. -/
 theorem fold_agree (n : ℕ) (gs : List Gate) (hgs : ∀ g ∈ gs, ¬ Reads n g)
     (W1 W2 : List Bool) (hl : W1.length = W2.length)
     (h : ∀ i, i ≠ n → W1.getD i false = W2.getD i false) :
@@ -349,7 +351,7 @@ theorem PEqualNP.Outside.L_meta_168 : ∀ (n : ℕ) (C : PEqualNP.CircuitLowerBo
     obtain ⟨hop, hl⟩ := hmin.1 g hg
     refine ⟨?_, hl⟩
     simpa [OkOp] using hop
-  -- The partial evaluation of `C` with the last input fixed to `false`; it does not depend on `y`.
+  -- The simplified evaluation of `C` with the last input fixed to `false`; it does not depend on `y`.
   obtain ⟨s0, hs0⟩ : ∃ s0 : List AV × List Gate,
       s0 = ((List.range n).map Sum.inr ++ [Sum.inl false], []) := ⟨_, rfl⟩
   obtain ⟨sF, hsF⟩ : ∃ sF, sF = C.gates.foldl (stepS n) s0 := ⟨_, rfl⟩
@@ -383,7 +385,7 @@ theorem PEqualNP.Outside.L_meta_168 : ∀ (n : ℕ) (C : PEqualNP.CircuitLowerBo
   simp only [hs0, List.length_nil, zero_add] at hcnt
   have hval : ∀ y : Fin n → Bool,
       interp (sF.2.foldl stepB (List.ofFn y)) (sF.1.getD C.output (Sum.inl false)) =
-        circuitFun (n + 1) C (Fin.snoc y false) := fun y => (hinv y).val C.output
+        circuitFun (n + 1) C (Fin.snoc y false) := fun y => (hinv y).1 C.output
   -- The output is not a constant, since the restricted function is not constant.
   obtain ⟨w, hw⟩ : ∃ w, sF.1.getD C.output (Sum.inl false) = Sum.inr w := by
     rcases h : sF.1.getD C.output (Sum.inl false) with b | w
@@ -398,7 +400,7 @@ theorem PEqualNP.Outside.L_meta_168 : ∀ (n : ℕ) (C : PEqualNP.CircuitLowerBo
       sF.2.length := by
     refine ⟨⟨sF.2, w⟩, ?_, le_refl _, ?_⟩
     · intro g hg
-      obtain ⟨hop, hl⟩ := (hinv (fun _ => false)).fan g hg
+      obtain ⟨hop, hl⟩ := (hinv (fun _ => false)).2.2.2 g hg
       refine ⟨?_, hl⟩
       rcases hop with h | h | h <;> simp [h]
     · intro y
@@ -431,7 +433,7 @@ theorem PEqualNP.Outside.L_meta_168 : ∀ (n : ℕ) (C : PEqualNP.CircuitLowerBo
   obtain ⟨j, hj⟩ := hex
   refine ⟨j, hj, fun j' hj' => ?_⟩
   by_contra hne
-  have h2 := two_le_countP (fun g => decide (Reads n g)) C.gates j' j
-    (by simpa [Reads] using hj') (by simpa [Reads] using hj) hne
+  have h2 := two_le_countP (fun g => readsB n g) C.gates j' j
+    ((readsB_iff n _).mpr hj') ((readsB_iff n _).mpr hj) hne
   simp only [Circuit.size] at hsz
   omega
